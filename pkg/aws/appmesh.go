@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws/awserr"
-
 	appmeshv1beta1 "github.com/aws/aws-app-mesh-controller-for-k8s/pkg/apis/appmesh/v1beta1"
-
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/appmesh"
 	set "github.com/deckarep/golang-set"
+	"github.com/mitchellh/copystructure"
+	"github.com/pkg/errors"
 	"k8s.io/klog"
 )
 
@@ -153,6 +153,15 @@ type VirtualNode struct {
 	Data appmesh.VirtualNodeData
 }
 
+type virtualNodeCacheItem struct {
+	key  string
+	data appmesh.VirtualNodeData
+}
+
+func virtualNodeCacheKey(name string, meshName string) string {
+	return name + "@" + meshName
+}
+
 // Name returns the name or an empty string
 func (v *VirtualNode) Name() string {
 	return aws.StringValue(v.Data.VirtualNodeName)
@@ -246,6 +255,34 @@ func (v *VirtualNode) BackendsSet() set.Set {
 
 // GetVirtualNode calls describe virtual node.
 func (c *Cloud) GetVirtualNode(ctx context.Context, name string, meshName string) (*VirtualNode, error) {
+	key := virtualNodeCacheKey(name, meshName)
+	item, exists, err := c.virtualNodeCache.GetByKey(key)
+	klog.V(5).Infof("Querying virtual node cache: (key: %s, exists: %t)", key, exists)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed reading virtualnode data from cache")
+	}
+	if exists {
+		vnodeCacheItem, ok := item.(*virtualNodeCacheItem)
+		if !ok {
+			return nil, fmt.Errorf("failed converting item to virtualNodeCacheItem")
+		}
+
+		dataCopy, err := copystructure.Copy(vnodeCacheItem.data)
+		if err != nil {
+			return nil, err
+		}
+
+		data, ok := dataCopy.(appmesh.VirtualNodeData)
+		if !ok {
+			return nil, fmt.Errorf("unable to copy virtualnode data from cache")
+		}
+		klog.V(5).Infof("Found virtual node in cache: (name: %s, mesh: %s)", name, meshName)
+
+		return &VirtualNode{
+			Data: data,
+		}, nil
+	}
+
 	begin := time.Now()
 	defer func() {
 		c.stats.SetRequestDuration("virtual_node", name, "get", time.Since(begin))
@@ -264,6 +301,24 @@ func (c *Cloud) GetVirtualNode(ctx context.Context, name string, meshName string
 	} else if output == nil || output.VirtualNode == nil {
 		return nil, fmt.Errorf("virtual node %s not found", name)
 	} else {
+		items := c.virtualNodeCache.List()
+		for i, item := range items {
+			vnodeCacheItem, ok := item.(*virtualNodeCacheItem)
+			if ok {
+				klog.V(3).Infof("VirtualNode cache item [%d]: (name: %s, mesh: %s, spec: %s)",
+					i,
+					aws.StringValue(vnodeCacheItem.data.MeshName),
+					aws.StringValue(vnodeCacheItem.data.VirtualNodeName),
+					vnodeCacheItem.data.Spec.String())
+			}
+		}
+		klog.V(3).Infof("Adding virtual node to cache: (name: %s, mesh: %s, spec: %s)",
+			name, meshName, (*output.VirtualNode).String())
+
+		_ = c.virtualNodeCache.Add(&virtualNodeCacheItem{
+			key:  virtualNodeCacheKey(name, meshName),
+			data: *output.VirtualNode,
+		})
 		return &VirtualNode{
 			Data: *output.VirtualNode,
 		}, nil

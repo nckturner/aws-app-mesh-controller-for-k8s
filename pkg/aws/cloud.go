@@ -29,6 +29,8 @@ type Cloud struct {
 	namespaceIDCache cache.Store
 	serviceIDCache   cache.Store
 
+	virtualNodeCache cache.Store
+
 	stats *metrics.Recorder
 }
 
@@ -78,6 +80,9 @@ func NewCloud(opts CloudOptions, stats *metrics.Recorder) (CloudAPI, error) {
 		}, 60*time.Second),
 		serviceIDCache: cache.NewTTLStore(func(obj interface{}) (string, error) {
 			return obj.(*cloudmapServiceCacheItem).key, nil
+		}, 60*time.Second),
+		virtualNodeCache: cache.NewTTLStore(func(obj interface{}) (string, error) {
+			return obj.(*virtualNodeCacheItem).key, nil
 		}, 60*time.Second),
 		stats: stats,
 	}, nil
